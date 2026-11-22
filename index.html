@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Tarnogród Interwencja</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #0a0a1a; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            width: 100vw; 
+            height: 100vh; 
+            overflow: hidden;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        #canvas { display: block; cursor: none; }
+        #overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(10,10,26,0.92);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            z-index: 10;
+        }
+        #overlay h1 { font-size: 2.5rem; color: #FFD700; margin-bottom: 0.5rem; }
+        #overlay p { color: #aaa; margin-bottom: 2rem; }
+        button {
+            background: #FFD700;
+            color: #1a1a2e;
+            border: none;
+            padding: 0.8rem 2rem;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            pointer-events: all;
+        }
+        button:hover { background: #FFC200; }
+    </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="overlay">
+    <h1>🚨 Tarnogród Interwencja</h1>
+    <p>Dojazd do zdarzeń w centrum Tarnogrodu</p>
+    <div id="score-info" style="margin-bottom:1rem;color:#FFD700;font-size:1.1rem;display:none"></div>
+    <button id="startBtn" onclick="startGame()">▶ Zagraj</button>
+    <div style="margin-top:1.5rem;color:#666;font-size:0.85rem;">WASD / strzałki – jazda &nbsp;|&nbsp; Spacja – sygnał</div>
+</div>
+<script>
+// === SETUP ===
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// === WORLD ===
+const WORLD_W = 3200;
+const WORLD_H = 3200;
+
+// === MAP DEFINITION ===
+// Roads: { x, y, w, h, name, lane }
+// Center of Tarnogród at (1600, 1600)
+
+const ROAD_COLOR = '#E8E4DC';
+const ROAD_LINE = '#D4C9A8';
+const GRASS_COLOR = '#B8D4A0';
+const SQUARE_COLOR = '#E0D8C8';
+const SIDEWALK_COLOR = '#D8D0C0';
+const BUILDING_COLORS = ['#C4A882', '#B09868', '#D4B896', '#A88854', '#CC9966'];
+const BUILDING_SHADOW = 'rgba(0,0,0,0.25)';
+const TREE_COLOR = '#5A9E3A';
+const TREE_DARK = '#3D7A28';
+
+// Define road segments
+const roads = [];
+
+function addRoad(x, y, w, h, name='', isMain=false) {
+    roads.push({x, y, w, h, name, isMain});
+}
+
+// Rynek (central square) ~200x200
+const RX = 1500, RY = 1500, RS = 220;
+
+// Main N-S road: Kościuszki (runs through center)
+addRoad(1575, 0, 90, 3200, 'ul. Kościuszki', true);
+// Main E-W road: 1 Maja (runs through center)
+addRoad(0, 1575, 3200, 90, 'ul. 1 Maja', true);
+
+// Rynek connects them - widen at intersection
+addRoad(RX, RY, RS, RS, 'Rynek', false);
+
+// Secondary roads
+addRoad(0, 1250, 3200, 65, 'ul. Partyzantów', false);
+addRoad(1870, 0, 65, 3200, 'ul. Zielona', false);
+addRoad(1200, 0, 60, 3200, 'ul. Lubelska', false);
+addRoad(0, 1900, 2800, 60, 'ul. Biłgorajska', false);
+addRoad(0, 2200, 1700, 55, 'ul. Lipowa', false);
+
+// Cross streets
+addRoad(900, 1250, 60, 700, '', false); // connecting Partyzantów to 1 Maja
+addRoad(2100, 1250, 60, 700, '', false);
+addRoad(0, 2500, 1900, 50, 'ul. Ogrodowa', false);
+addRoad(1870, 1900, 60, 700, '', false);
+
+// Define buildings
+const buildings = [];
+
+function addBuilding(x, y, w, h, colorIdx=0) {
+    buildings.push({x, y, w, h, color: BUILDING_COLORS[colorIdx % BUILDING_COLORS.length]});
+}
+
+// Generate city blocks with buildings
+function genBlock(bx, by, bw, bh, density=0.7) {
+    const pad = 10;
+    const minSize = 60;
+    const maxW = 140, maxH = 120;
+    
+    let cx = bx + pad;
+    while (cx < bx + bw - pad - minSize) {
+        let cy = by + pad;
+        while (cy < by + bh - pad - minSize) {
+            if (Math.random() < density) {
+                const bldW = Math.min(maxW, bx + bw - pad - cx - 5);
+                const bldH = Math.min(maxH, by + bh - pad - cy - 5);
+                if (bldW > minSize && bldH > minSize) {
+                    addBuilding(cx, cy, 
+                        bldW * (0.5 + Math.random() * 0.5) | 0,
+                        bldH * (0.5 + Math.random() * 0.5) | 0,
+                        Math.random() * BUILDING_COLORS.length | 0
+                    );
+                }
+            }
+            cy += maxH + 15;
+        }
+        cx += maxW + 20;
+    }
+}
+
+// City block definitions (between roads)
+// NW quadrant
+genBlock(0, 0, 1180, 1240);
+genBlock(1270, 0, 290, 1240);
+genBlock(1650, 0, 200, 1240);
+genBlock(1950, 0, 1250, 1240);
+
+// Between Partyzantów and 1 Maja
+genBlock(0, 1330, 880, 230);
+genBlock(980, 1330, 180, 230);
+genBlock(1270, 1330, 290, 155);  
+genBlock(1650, 0+1330, 200, 230);
+genBlock(1950, 1330, 160, 230);
+genBlock(2180, 1330, 1020, 230);
+
+// Around Rynek (special buildings - leave open near square)
+genBlock(0, 1680, 1480, 200);
+genBlock(1680, 1680, 170, 200);
+genBlock(1950, 1680, 1250, 200);
+
+// Between 1 Maja and Biłgorajska
+genBlock(0, 1680, 880, 200);
+genBlock(980, 1680, 180, 200);
+
+// S section
+genBlock(0, 1970, 1860, 200);
+genBlock(1950, 1970, 850, 200);
+
+genBlock(0, 2280, 1180, 200);
+genBlock(1280, 2280, 570, 200);
+genBlock(1950, 2280, 1250, 200);
+
+genBlock(0, 2560, 3200, 640);
+
+// Trees
+const trees = [];
+function addTree(x, y, r=15) {
+    trees.push({x, y, r});
+}
+
+// Add trees along streets and in parks
+for (let i = 0; i < 200; i++) {
+    // Random trees in green areas and along streets
+    const x = Math.random() * 3200;
+    const y = Math.random() * 3200;
+    // Only place if not on road
+    addTree(x, y, 10 + Math.random() * 12);
+}
+
+// Park trees near Rynek
+for (let i = 0; i < 20; i++) {
+    addTree(RX + RS + 40 + Math.random() * 80, RY + Math.random() * RS, 12 + Math.random() * 8);
+}
+
+// === INCIDENT TYPES ===
+const INCIDENT_TYPES = [
+    { name: 'Pożar altany na działkach', icon: '🔥', color: '#FF4444', points: 150, time: 90 },
+    { name: 'Zalana piwnica przy Rynku', icon: '💧', color: '#4488FF', points: 120, time: 80 },
+    { name: 'Awaria zasilania', icon: '⚡', color: '#FFD700', points: 100, time: 75 },
+    { name: 'Kolizja na skrzyżowaniu', icon: '🚗', color: '#FF6600', points: 130, time: 70 },
+    { name: 'Zdarzenie drogowe – wylot', icon: '🚨', color: '#FF3366', points: 160, time: 85 },
+    { name: 'Zgłoszenie od mieszkańców', icon: '📢', color: '#9966FF', points: 90, time: 100 },
+    { name: 'Dym przy ul. Zielonej', icon: '💨', color: '#888888', points: 110, time: 80 },
+    { name: 'Wypadek przy Biłgorajskiej', icon: '🚑', color: '#FF4444', points: 140, time: 75 },
+];
+
+// Fixed incident spawn points (on roads/streets)
+const SPAWN_POINTS = [
+    { x: 400, y: 1600, street: 'ul. 1 Maja' },
+    { x: 2800, y: 1600, street: 'ul. 1 Maja' },
+    { x: 1620, y: 400, street: 'ul. Kościuszki' },
+    { x: 1620, y: 2800, street: 'ul. Kościuszki' },
+    { x: 500, y: 1290, street: 'ul. Partyzantów' },
+    { x: 2500, y: 1290, street: 'ul. Partyzantów' },
+    { x: 1920, y: 600, street: 'ul. Zielona' },
+    { x: 1920, y: 2200, street: 'ul. Zielona' },
+    { x: 400, y: 1930, street: 'ul. Biłgorajska' },
+    { x: 2400, y: 1930, street: 'ul. Biłgorajska' },
+    { x: 1250, y: 800, street: 'ul. Lubelska' },
+    { x: 1250, y: 2600, street: 'ul. Lubelska' },
+    { x: RX + RS/2, y: RY + RS/2, street: 'Rynek' },
+];
+
+// === PLAYER ===
+const player = {
+    x: 1620, y: 1200,
+    vx: 0, vy: 0,
+    angle: 0,       // radians, 0 = right
+    speed: 0,
+    width: 32, height: 18,
+    maxSpeed: 8,
+    acceleration: 0.25,
+    friction: 0.92,
+    turnSpeed: 0.045,
+    hearts: 3,
+    maxHearts: 3,
+    score: 0,
+    interventions: 0,
+    invincible: 0,  // invincibility frames after collision
+};
+
+// === AI TRAFFIC ===
+const AI_CARS = [];
+const AI_ROUTES = [
+    // Horizontal routes
+    { x: -50, y: 1600, angle: 0, speed: 2.2, route: 'h', lane: 1600 },
+    { x: 3250, y: 1555, angle: Math.PI, speed: 2.0, route: 'h', lane: 1555 },
+    { x: -50, y: 1920, angle: 0, speed: 1.8, route: 'h2', lane: 1920 },
+    { x: 3250, y: 1890, angle: Math.PI, speed: 2.5, route: 'h2', lane: 1890 },
+    { x: -50, y: 1270, angle: 0, speed: 2.3, route: 'p', lane: 1270 },
+    // Vertical routes
+    { x: 1600, y: -50, angle: Math.PI/2, speed: 2.1, route: 'v', lane: 1600 },
+    { x: 1590, y: 3250, angle: -Math.PI/2, speed: 1.9, route: 'v', lane: 1590 },
+    { x: 1920, y: -50, angle: Math.PI/2, speed: 2.4, route: 'z', lane: 1920 },
+    { x: 1250, y: -50, angle: Math.PI/2, speed: 2.0, route: 'l', lane: 1250 },
+];
+
+const CAR_COLORS = ['#CC4444', '#4466CC', '#44AA66', '#CC8844', '#884499', '#44AACC'];
+
+function spawnAICars() {
+    AI_ROUTES.forEach((route, i) => {
+        AI_CARS.push({
+            x: route.x,
+            y: route.y,
+            angle: route.angle,
+            speed: route.speed * (0.8 + Math.random() * 0.4),
+            route: route.route,
+            lane: route.lane,
+            width: 28, height: 16,
+            color: CAR_COLORS[i % CAR_COLORS.length],
+            active: true,
+        });
+    });
+}
+
+// === MISSION ===
+let mission = null;
+let missionTimer = 0;
+let atMission = false;
+let atMissionTimer = 0;
+const AT_MISSION_REQUIRED = 120; // frames
+
+function newMission() {
+    const type = INCIDENT_TYPES[Math.floor(Math.random() * INCIDENT_TYPES.length)];
+    let spawn;
+    do {
+        spawn = SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)];
+    } while (mission && spawn.x === mission.x && spawn.y === mission.y);
+    
+    mission = {
+        x: spawn.x,
+        y: spawn.y,
+        street: spawn.street,
+        ...type,
+        timerLeft: type.time,
+    };
+    missionTimer = type.time * 60; // convert to frames
+    atMission = false;
+    atMissionTimer = 0;
+}
+
+// === GAME STATE ===
+let gameState = 'menu'; // menu, playing, gameover
+let highScore = parseInt(localStorage.getItem('tarnogrod_hs') || '0');
+let frame = 0;
+
+// === INPUT ===
+const keys = {};
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// === AUDIO ===
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playBeep(freq=440, dur=0.1, vol=0.3, type='square') {
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + dur);
+        osc.start();
+        osc.stop(audioCtx.currentTime + dur);
+    } catch(e) {}
+}
+
+function playSiren() {
+    // Simple siren sweep
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+        osc.frequency.linearRampToValueAtTime(800, audioCtx.currentTime + 0.3);
+        osc.frequency.linearRampToValueAtTime(600, audioCtx.currentTime + 0.6);
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.6);
+    } catch(e) {}
+}
+
+function playSuccess() {
+    [523, 659, 784].forEach((f, i) => {
+        setTimeout(() => playBeep(f, 0.15, 0.3, 'sine'), i * 100);
+    });
+}
+
+function playHit() {
+    playBeep(150, 0.3, 0.4, 'sawtooth');
+}
+
+// === CAMERA ===
+const cam = {
+    x: 1620, y: 1200,
+    tx: 1620, ty: 1200,
+};
+
+function updateCamera() {
+    // Smooth follow with slight lead in movement direction
+    const leadX = player.vx * 40;
+    const leadY = player.vy * 40;
+    cam.tx = player.x + leadX;
+    cam.ty = player.y + leadY;
+    cam.x += (cam.tx - cam.x) * 0.08;
+    cam.y += (cam.ty - cam.y) * 0.08;
+    cam.x = Math.max(W/2, Math.min(WORLD_W - W/2, cam.x));
+    cam.y = Math.max(H/2, Math.min(WORLD_H - H/2, cam.y));
+}
+
+function worldToScreen(wx, wy) {
+    return {
+        x: wx - cam.x + W/2,
+        y: wy - cam.y + H/2,
+    };
+}
+
+// === COLLISION ===
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+
+function getPlayerRect() {
+    // Approximate player as axis-aligned rect
+    const r = Math.max(player.width, player.height) / 2;
+    return { x: player.x - r, y: player.y - r, w: r*2, h: r*2 };
+}
+
+function isOnRoad(x, y, margin=5) {
+    for (const r of roads) {
+        if (x > r.x + margin && x < r.x + r.w - margin &&
+            y > r.y + margin && y < r.y + r.h - margin) return true;
+    }
+    return false;
+}
+
+// === UPDATE ===
+function update() {
+    if (gameState !== 'playing') return;
+    frame++;
+
+    // Player controls
+    const thrusting = keys['KeyW'] || keys['ArrowUp'];
+    const braking = keys['KeyS'] || keys['ArrowDown'];
+    const left = keys['KeyA'] || keys['ArrowLeft'];
+    const right = keys['KeyD'] || keys['ArrowRight'];
+    const siren = keys['Space'];
+
+    // Siren sound
+    if (siren && frame % 36 === 0) playSiren();
+
+    // Turning (speed-dependent)
+    const turnFactor = Math.min(1, Math.abs(player.speed) / 2);
+    if (left) player.angle -= player.turnSpeed * turnFactor * Math.sign(player.speed || 1);
+    if (right) player.angle += player.turnSpeed * turnFactor * Math.sign(player.speed || 1);
+
+    // Acceleration
+    if (thrusting) player.speed += player.acceleration;
+    else if (braking) player.speed -= player.acceleration * 1.5;
+    else player.speed *= 0.95;
+
+    player.speed = Math.max(-player.maxSpeed * 0.5, Math.min(player.maxSpeed, player.speed));
+
+    // Apply velocity
+    player.vx = Math.cos(player.angle) * player.speed;
+    player.vy = Math.sin(player.angle) * player.speed;
+
+    // Try move
+    let nx = player.x + player.vx;
+    let ny = player.y + player.vy;
+
+    // Keep in world
+    nx = Math.max(16, Math.min(WORLD_W - 16, nx));
+    ny = Math.max(16, Math.min(WORLD_H - 16, ny));
+
+    // Building collision
+    const pRect = { x: nx - 14, y: ny - 10, w: 28, h: 20 };
+    let blocked = false;
+    for (const b of buildings) {
+        if (rectsOverlap(pRect.x, pRect.y, pRect.w, pRect.h, b.x, b.y, b.w, b.h)) {
+            blocked = true;
+            if (player.invincible <= 0) {
+                player.hearts--;
+                player.invincible = 120;
+                player.speed *= -0.5;
+                playHit();
+                if (player.hearts <= 0) endGame();
+            }
+            break;
+        }
+    }
+    
+    if (!blocked) {
+        player.x = nx;
+        player.y = ny;
+    } else {
+        player.speed *= -0.4;
+    }
+
+    if (player.invincible > 0) player.invincible--;
+
+    // AI Cars
+    updateAI();
+
+    // AI collision with player
+    if (player.invincible <= 0) {
+        for (const car of AI_CARS) {
+            const dx = player.x - car.x;
+            const dy = player.y - car.y;
+            if (Math.sqrt(dx*dx + dy*dy) < 28) {
+                player.hearts--;
+                player.invincible = 150;
+                player.speed = -player.speed * 0.5;
+                playHit();
+                if (player.hearts <= 0) endGame();
+                break;
+            }
+        }
+    }
+
+    // Mission timer
+    if (mission) {
+        missionTimer--;
+        mission.timerLeft = Math.ceil(missionTimer / 60);
+
+        // Check if at mission
+        const dx = player.x - mission.x;
+        const dy = player.y - mission.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+
+        if (dist < 80) {
+            atMissionTimer++;
+            if (atMissionTimer >= AT_MISSION_REQUIRED) {
+                // Complete!
+                const bonus = Math.floor((missionTimer / 60 / mission.time) * 50);
+                player.score += mission.points + bonus;
+                player.interventions++;
+                playSuccess();
+                newMission();
+            }
+        } else {
+            atMissionTimer = Math.max(0, atMissionTimer - 2);
+        }
+
+        if (missionTimer <= 0) {
+            player.hearts--;
+            playHit();
+            if (player.hearts <= 0) {
+                endGame();
+            } else {
+                newMission();
+            }
+        }
+    }
+
+    updateCamera();
+}
+
+function updateAI() {
+    for (const car of AI_CARS) {
+        car.x += Math.cos(car.angle) * car.speed;
+        car.y += Math.sin(car.angle) * car.speed;
+
+        // Wrap around world
+        if (car.x > WORLD_W + 100) car.x = -100;
+        if (car.x < -100) car.x = WORLD_W + 100;
+        if (car.y > WORLD_H + 100) car.y = -100;
+        if (car.y < -100) car.y = WORLD_H + 100;
+    }
+}
+
+// === DRAWING ===
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    if (gameState === 'playing') {
+        drawWorld();
+        drawHUD();
+        drawMinimap();
+    }
+}
+
+function drawWorld() {
+    const ox = W/2 - cam.x;
+    const oy = H/2 - cam.y;
+
+    ctx.save();
+    ctx.translate(ox, oy);
+
+    // Background (grass)
+    ctx.fillStyle = GRASS_COLOR;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+    // Roads
+    for (const r of roads) {
+        ctx.fillStyle = ROAD_COLOR;
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+
+        // Lane markings
+        ctx.strokeStyle = '#CCBF96';
+        ctx.setLineDash([30, 20]);
+        ctx.lineWidth = 2;
+        if (r.w > r.h && r.w > 100) {
+            // Horizontal road - center line
+            ctx.beginPath();
+            ctx.moveTo(r.x, r.y + r.h/2);
+            ctx.lineTo(r.x + r.w, r.y + r.h/2);
+            ctx.stroke();
+        } else if (r.h > r.w && r.h > 100) {
+            // Vertical road - center line
+            ctx.beginPath();
+            ctx.moveTo(r.x + r.w/2, r.y);
+            ctx.lineTo(r.x + r.w/2, r.y + r.h);
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        // Road name
+        if (r.name) {
+            ctx.save();
+            ctx.font = '11px Segoe UI';
+            ctx.fillStyle = 'rgba(100,80,40,0.7)';
+            const sp = worldToScreen(r.x + r.w/2 - ox, r.y + r.h/2 - oy);
+            if (r.w > r.h) {
+                ctx.fillText(r.name, r.x + 20, r.y + r.h/2 - 4);
+            } else {
+                ctx.save();
+                ctx.translate(r.x + r.w/2, r.y + r.h * 0.3);
+                ctx.rotate(-Math.PI/2);
+                ctx.fillText(r.name, 0, 0);
+                ctx.restore();
+            }
+            ctx.restore();
+        }
+    }
+
+    // Rynek
+    ctx.fillStyle = SQUARE_COLOR;
+    ctx.fillRect(RX, RY, RS, RS);
+    ctx.strokeStyle = '#C4B896';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(RX + 10, RY + 10, RS - 20, RS - 20);
+    ctx.font = 'bold 13px Segoe UI';
+    ctx.fillStyle = '#6B5030';
+    ctx.textAlign = 'center';
+    ctx.fillText('RYNEK', RX + RS/2, RY + RS/2 + 5);
+    ctx.textAlign = 'left';
+
+    // Trees (only visible ones)
+    for (const t of trees) {
+        const sx = t.x + ox, sy = t.y + oy;
+        if (sx < -30 || sx > W+30 || sy < -30 || sy > H+30) continue;
+        
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.beginPath();
+        ctx.ellipse(t.x + 4, t.y + 6, t.r * 0.8, t.r * 0.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Tree
+        ctx.fillStyle = TREE_COLOR;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = TREE_DARK;
+        ctx.beginPath();
+        ctx.arc(t.x - t.r * 0.3, t.y - t.r * 0.2, t.r * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Buildings (only visible)
+    for (const b of buildings) {
+        const sx = b.x + ox, sy = b.y + oy;
+        if (sx + b.w < -10 || sx > W+10 || sy + b.h < -10 || sy > H+10) continue;
+
+        // Shadow
+        ctx.fillStyle = BUILDING_SHADOW;
+        ctx.fillRect(b.x + 6, b.y + 6, b.w, b.h);
+
+        // Building
+        ctx.fillStyle = b.color;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+
+        // Roof detail
+        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+        ctx.fillRect(b.x, b.y, b.w, 8);
+
+        // Windows (simple dots)
+        if (b.w > 50 && b.h > 40) {
+            ctx.fillStyle = 'rgba(255,255,180,0.6)';
+            const cols = Math.floor(b.w / 20);
+            const rows = Math.floor(b.h / 20);
+            for (let r = 1; r <= rows; r++) {
+                for (let c = 1; c <= cols; c++) {
+                    ctx.fillRect(b.x + c * (b.w/(cols+1)) - 4, b.y + r * (b.h/(rows+1)) - 3, 7, 5);
+                }
+            }
+        }
+    }
+
+    // Mission marker
+    if (mission) {
+        const pulse = (Math.sin(frame * 0.1) + 1) / 2;
+        
+        // Pulsing circle
+        ctx.beginPath();
+        ctx.arc(mission.x, mission.y, 30 + pulse * 15, 0, Math.PI * 2);
+        ctx.strokeStyle = mission.color;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(mission.x, mission.y, 20, 0, Math.PI * 2);
+        ctx.fillStyle = mission.color + 'CC';
+        ctx.fill();
+
+        ctx.font = '20px serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(mission.icon, mission.x, mission.y + 7);
+        ctx.textAlign = 'left';
+
+        // Direction arrow at screen edge if off-screen
+        const mx = mission.x + ox;
+        const my = mission.y + oy;
+        if (mx < 0 || mx > W || my < 0 || my > H) {
+            drawDirectionArrow(mx, my, mission.color);
+        }
+
+        // "At mission" progress arc
+        if (atMissionTimer > 0) {
+            const prog = atMissionTimer / AT_MISSION_REQUIRED;
+            ctx.beginPath();
+            ctx.arc(mission.x, mission.y, 35, -Math.PI/2, -Math.PI/2 + prog * Math.PI * 2);
+            ctx.strokeStyle = '#00FF88';
+            ctx.lineWidth = 5;
+            ctx.stroke();
+        }
+    }
+
+    // AI Cars
+    for (const car of AI_CARS) {
+        ctx.save();
+        ctx.translate(car.x, car.y);
+        ctx.rotate(car.angle);
+        ctx.fillStyle = car.color;
+        ctx.fillRect(-car.width/2, -car.height/2, car.width, car.height);
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fillRect(-car.width/2, -car.height/2, car.width/3, car.height);
+        ctx.restore();
+    }
+
+    // Player car
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(player.angle);
+
+    // Invincibility flash
+    if (player.invincible > 0 && Math.floor(player.invincible / 6) % 2 === 0) {
+        ctx.globalAlpha = 0.4;
+    }
+
+    // Car body
+    ctx.fillStyle = '#E8F0FF';
+    ctx.fillRect(-player.width/2, -player.height/2, player.width, player.height);
+
+    // Windshield
+    ctx.fillStyle = 'rgba(100,180,255,0.6)';
+    ctx.fillRect(player.width/2 - 10, -player.height/2 + 2, 10, player.height - 4);
+
+    // Roof rack / lights
+    ctx.fillStyle = '#FF4444';
+    ctx.fillRect(-6, -player.height/2, 12, 5);
+    ctx.fillStyle = '#4444FF';
+    ctx.fillRect(-6, player.height/2 - 5, 12, 5);
+
+    // Siren flash
+    if (keys['Space'] && frame % 20 < 10) {
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = '#FF4444';
+        ctx.beginPath();
+        ctx.arc(0, -player.height/2 - 8, 6, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    ctx.restore(); // end world transform
+}
+
+function drawDirectionArrow(screenX, screenY, color) {
+    const cx = W / 2;
+    const cy = H / 2;
+    const angle = Math.atan2(screenY - cy, screenX - cx);
+    
+    // Find intersection with screen border
+    const margin = 60;
+    let ax = cx + Math.cos(angle) * (Math.min(W, H) / 2 - margin);
+    let ay = cy + Math.sin(angle) * (Math.min(W, H) / 2 - margin);
+
+    ax = Math.max(margin, Math.min(W - margin, cx + Math.cos(angle) * 500));
+    ay = Math.max(margin, Math.min(H - margin, cy + Math.sin(angle) * 500));
+
+    ctx.save();
+    ctx.translate(ax + cam.x - W/2, ay + cam.y - H/2); // back to world coords
+    ctx.rotate(angle);
+    
+    const pulse = (Math.sin(frame * 0.15) + 1) / 2;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.7 + pulse * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(20, 0);
+    ctx.lineTo(-10, -12);
+    ctx.lineTo(-10, 12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+}
+
+function drawHUD() {
+    // === TOP LEFT: Player info ===
+    ctx.save();
+    
+    // Panel bg
+    ctx.fillStyle = 'rgba(0,0,20,0.75)';
+    roundRect(10, 10, 220, 85, 10);
+    ctx.fill();
+
+    // Avatar
+    ctx.font = '28px serif';
+    ctx.fillText('🎙️', 18, 52);
+
+    // Role
+    ctx.font = 'bold 11px Segoe UI';
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText('REPORTER • TARNOGRÓD', 52, 28);
+
+    // Speed
+    const speed = Math.abs(player.speed) * 15;
+    ctx.font = 'bold 20px Segoe UI';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(`${speed.toFixed(0)} km/h`, 52, 52);
+
+    // Hearts
+    for (let i = 0; i < player.maxHearts; i++) {
+        ctx.font = '18px serif';
+        ctx.fillText(i < player.hearts ? '❤️' : '🖤', 52 + i * 26, 76);
+    }
+
+    // === TOP CENTER: Mission ===
+    if (mission) {
+        const panelW = 380;
+        const panelX = W/2 - panelW/2;
+        
+        ctx.fillStyle = 'rgba(0,0,20,0.8)';
+        roundRect(panelX, 10, panelW, 68, 10);
+        ctx.fill();
+
+        // Alert color stripe
+        ctx.fillStyle = mission.color;
+        roundRect(panelX, 10, 5, 68, 10);
+        ctx.fill();
+
+        // Incident name
+        ctx.font = 'bold 14px Segoe UI';
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${mission.icon} ${mission.name}`, W/2, 34);
+
+        // Street
+        ctx.font = '11px Segoe UI';
+        ctx.fillStyle = '#AABBCC';
+        ctx.fillText(mission.street, W/2, 50);
+
+        // Timer
+        const t = mission.timerLeft;
+        const urgency = t < 15 ? '#FF4444' : t < 30 ? '#FF8800' : '#00CC88';
+        const pulse = t < 15 ? (Math.sin(frame * 0.3) + 1) / 2 : 0;
+        
+        ctx.font = `bold ${16 + pulse * 4}px Segoe UI`;
+        ctx.fillStyle = urgency;
+        ctx.fillText(`⏱ ${t} s`, W/2, 70);
+
+        // Progress bar
+        const pct = mission.timerLeft / mission.time;
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect(panelX + 10, 76, panelW - 20, 4);
+        ctx.fillStyle = urgency;
+        ctx.fillRect(panelX + 10, 76, (panelW - 20) * pct, 4);
+
+        // At-mission progress
+        if (atMissionTimer > 0) {
+            const prog = atMissionTimer / AT_MISSION_REQUIRED;
+            ctx.fillStyle = '#00FF88';
+            ctx.fillRect(panelX + 10, 80, (panelW - 20) * prog, 4);
+            ctx.font = 'bold 11px Segoe UI';
+            ctx.fillStyle = '#00FF88';
+            ctx.fillText('● REJESTROWANIE...', W/2, 100);
+        }
+
+        ctx.textAlign = 'left';
+    }
+
+    // === TOP RIGHT: Score & buttons ===
+    ctx.fillStyle = 'rgba(0,0,20,0.75)';
+    roundRect(W - 200, 10, 190, 85, 10);
+    ctx.fill();
+
+    ctx.font = 'bold 22px Segoe UI';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${player.score} pkt`, W - 15, 36);
+
+    ctx.font = '11px Segoe UI';
+    ctx.fillStyle = '#AABBCC';
+    ctx.fillText(`Interwencje: ${player.interventions}`, W - 15, 54);
+    ctx.fillText(`Rekord: ${Math.max(highScore, player.score)} pkt`, W - 15, 70);
+
+    // End game button
+    ctx.fillStyle = 'rgba(255,60,60,0.8)';
+    roundRect(W - 190, 80, 170, 26, 6);
+    ctx.fill();
+    ctx.font = 'bold 11px Segoe UI';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('✕ Koniec gry', W - 15, 97);
+
+    ctx.textAlign = 'left';
+
+    // === Controls hint ===
+    if (frame < 300) {
+        ctx.fillStyle = `rgba(255,255,255,${Math.min(1, (300 - frame) / 60) * 0.6})`;
+        ctx.font = '12px Segoe UI';
+        ctx.textAlign = 'center';
+        ctx.fillText('WASD / strzałki – jazda   •   Spacja – syren   •   Dojedź do markera i poczekaj!', W/2, H - 15);
+        ctx.textAlign = 'left';
+    }
+
+    ctx.restore();
+}
+
+function drawMinimap() {
+    const MM_X = W - 155;
+    const MM_Y = H - 155;
+    const MM_W = 140;
+    const MM_H = 140;
+    const scale = MM_W / WORLD_W;
+
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,20,0.8)';
+    roundRect(MM_X - 5, MM_Y - 5, MM_W + 10, MM_H + 10, 8);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.rect(MM_X, MM_Y, MM_W, MM_H);
+    ctx.clip();
+
+    // Grass bg
+    ctx.fillStyle = '#6A9A50';
+    ctx.fillRect(MM_X, MM_Y, MM_W, MM_H);
+
+    // Roads
+    ctx.fillStyle = '#D8D0B8';
+    for (const r of roads) {
+        ctx.fillRect(MM_X + r.x * scale, MM_Y + r.y * scale, r.w * scale, r.h * scale);
+    }
+
+    // Rynek
+    ctx.fillStyle = '#C8C0A8';
+    ctx.fillRect(MM_X + RX * scale, MM_Y + RY * scale, RS * scale, RS * scale);
+
+    // Mission dot
+    if (mission) {
+        const pulse = (Math.sin(frame * 0.15) + 1) / 2;
+        ctx.fillStyle = mission.color;
+        ctx.beginPath();
+        ctx.arc(MM_X + mission.x * scale, MM_Y + mission.y * scale, 3 + pulse * 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Player dot
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(MM_X + player.x * scale, MM_Y + player.y * scale, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Player direction indicator
+    ctx.strokeStyle = '#00FF88';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(MM_X + player.x * scale, MM_Y + player.y * scale);
+    ctx.lineTo(MM_X + (player.x + Math.cos(player.angle) * 40) * scale,
+               MM_Y + (player.y + Math.sin(player.angle) * 40) * scale);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // Label
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = '9px Segoe UI';
+    ctx.fillText('TARNOGRÓD', MM_X, MM_Y - 7);
+}
+
+function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+// === GAME FLOW ===
+function startGame() {
+    audioCtx.resume();
+    overlay.style.display = 'none';
+    
+    // Reset player
+    player.x = 1620; player.y = 1200;
+    player.vx = 0; player.vy = 0;
+    player.angle = 0;
+    player.speed = 0;
+    player.hearts = player.maxHearts;
+    player.score = 0;
+    player.interventions = 0;
+    player.invincible = 0;
+
+    cam.x = player.x; cam.y = player.y;
+
+    // Respawn AI
+    AI_CARS.length = 0;
+    spawnAICars();
+
+    frame = 0;
+    gameState = 'playing';
+    newMission();
+    playBeep(440, 0.1, 0.2, 'sine');
+}
+
+function endGame() {
+    gameState = 'gameover';
+    if (player.score > highScore) {
+        highScore = player.score;
+        localStorage.setItem('tarnogrod_hs', highScore);
+    }
+    
+    overlay.style.display = 'flex';
+    overlay.querySelector('h1').textContent = '🏁 Koniec interwencji';
+    overlay.querySelector('p').textContent = `Interwencji: ${player.interventions}  |  Wynik: ${player.score} pkt`;
+    
+    const info = overlay.querySelector('#score-info');
+    info.style.display = 'block';
+    info.textContent = `🏆 Rekord: ${highScore} pkt`;
+    
+    document.getElementById('startBtn').textContent = '▶ Zagraj ponownie';
+    
+    playBeep(300, 0.5, 0.3, 'sawtooth');
+}
+
+// Click on "end game" button
+canvas.addEventListener('click', e => {
+    if (gameState !== 'playing') return;
+    // Check if click on end-game button area
+    if (e.clientX > W - 190 && e.clientX < W - 10 && e.clientY > 80 && e.clientY < 106) {
+        endGame();
+    }
+});
+
+// === GAME LOOP ===
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// Init
+loop();
+
+</script>
+</body>
+</html>
